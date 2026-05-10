@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import signal
@@ -11,6 +12,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -18,6 +21,62 @@ VK_BIN = ROOT / "headless-vk-creator-linux-x64"
 TELEMOST_BIN = ROOT / "headless-telemost-creator-linux-x64"
 
 JOIN_LINK_RE = re.compile(r"join_link:\s*(\S+)")
+
+
+def _telegram_configured() -> bool:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    return bool(token and chat_id)
+
+
+def send_telegram_text(text: str) -> None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        return
+    payload = json.dumps(
+        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                print(f"run_headless: Telegram HTTP {resp.status}", file=sys.stderr)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        print(f"run_headless: Telegram HTTP {e.code}: {detail}", file=sys.stderr)
+    except OSError as e:
+        print(f"run_headless: Telegram: {e}", file=sys.stderr)
+
+
+def send_telegram_join_link(label: str, url: str) -> None:
+    text = (
+        "Обновлены настройки конференций\n\n"
+        f"CALL CREATED ({label})\njoin_link:\n{url}"
+    )
+    send_telegram_text(text)
+
+
+def send_telegram_conference_suspended(stopped_label: str, exit_code: int) -> None:
+    lines = ["Приостановлена конференция."]
+    if exit_code != 0:
+        lines.append("Сбой приложения.")
+    lines.append(f"Первым завершился процесс: {stopped_label}, код выхода: {exit_code}.")
+    send_telegram_text("\n".join(lines))
+
+
+def prestart_delay_seconds() -> int:
+    raw = os.environ.get("PRESTART_SECONDS", "3").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +126,7 @@ def stream_reader(label: str, proc: subprocess.Popen) -> None:
                     "-------------------------------------------\n",
                     flush=True,
                 )
+                send_telegram_join_link(label, url)
                 awaiting = False
 
 
@@ -95,13 +155,13 @@ def main() -> int:
         ("Telemost", TELEMOST_BIN, tm_cookie),
     ]
 
-    procs: list[subprocess.Popen] = []
+    labeled_procs: list[tuple[str, subprocess.Popen]] = []
 
     def shutdown(signum: int, frame: object | None) -> None:
-        for proc in procs:
+        for _, proc in labeled_procs:
             if proc.poll() is None:
                 proc.send_signal(signum)
-        for proc in procs:
+        for _, proc in labeled_procs:
             if proc.poll() is None:
                 try:
                     proc.wait(timeout=30)
@@ -115,7 +175,14 @@ def main() -> int:
 
     env = os.environ.copy()
 
-    proc_by_label: list[tuple[str, subprocess.Popen]] = []
+    delay = prestart_delay_seconds()
+    if delay > 0:
+        msg = f"Через {delay} с запуск конференций VK и Telemost."
+        print(f"run_headless: пауза {delay} с перед запуском процессов…", flush=True)
+        if _telegram_configured():
+            send_telegram_text(msg)
+        time.sleep(delay)
+
     for label, binary, cookie_path in jobs:
         if not binary.is_file():
             print(f"run_headless: не найден {binary}", file=sys.stderr)
@@ -131,21 +198,21 @@ def main() -> int:
             text=True,
             bufsize=1,
         )
-        procs.append(proc)
-        proc_by_label.append((label, proc))
+        labeled_procs.append((label, proc))
 
-    for label, proc in proc_by_label:
+    for label, proc in labeled_procs:
         threading.Thread(target=stream_reader, args=(label, proc), daemon=True).start()
 
     try:
         while True:
-            for proc in procs:
+            for label, proc in labeled_procs:
                 code = proc.poll()
                 if code is not None:
-                    for q in procs:
+                    send_telegram_conference_suspended(label, code)
+                    for other_label, q in labeled_procs:
                         if q is not proc and q.poll() is None:
                             q.terminate()
-                    for q in procs:
+                    for _, q in labeled_procs:
                         if q.poll() is None:
                             try:
                                 q.wait(timeout=30)
