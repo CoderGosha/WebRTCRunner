@@ -1,0 +1,9 @@
+services:
+  webrtc-runner:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./cookies:/app/cookies:ro
