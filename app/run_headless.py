@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from typing import TextIO
+import html
 import json
 import os
 import re
@@ -40,17 +41,21 @@ def _telegram_configured() -> bool:
     return bool(token and chat_id)
 
 
-def send_telegram_text(text: str) -> None:
+def send_telegram_text(text: str, parse_mode: str | None = None) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
         return
     server = os.environ.get("SERVER_NAME", "").strip() or "—"
     body = f"Сервер: {server}\n\n{text}"
-    payload = json.dumps(
-        {"chat_id": chat_id, "text": body, "disable_web_page_preview": True},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    payload_obj: dict[str, object] = {
+        "chat_id": chat_id,
+        "text": body,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload_obj["parse_mode"] = parse_mode
+    payload = json.dumps(payload_obj, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=payload,
@@ -69,11 +74,14 @@ def send_telegram_text(text: str) -> None:
 
 
 def send_telegram_join_link(label: str, url: str) -> None:
+    # Все ссылки отправляем как code block по запросу пользователя.
     text = (
         "Обновлены настройки конференций\n\n"
-        f"CALL CREATED ({label})\njoin_link:\n{url}"
+        f"CALL CREATED ({html.escape(label)})\n"
+        "join_link:\n"
+        f"<pre>{html.escape(url)}</pre>"
     )
-    send_telegram_text(text)
+    send_telegram_text(text, parse_mode="HTML")
 
 
 def send_telegram_conference_suspended(stopped_label: str, exit_code: int) -> None:
