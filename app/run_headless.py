@@ -34,8 +34,10 @@ def send_telegram_text(text: str) -> None:
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
         return
+    server = os.environ.get("SERVER_NAME", "").strip() or "—"
+    body = f"Сервер: {server}\n\n{text}"
     payload = json.dumps(
-        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+        {"chat_id": chat_id, "text": body, "disable_web_page_preview": True},
         ensure_ascii=False,
     ).encode("utf-8")
     req = urllib.request.Request(
