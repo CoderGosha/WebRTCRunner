@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Запускает оба headless-бинарника параллельно с одним -cookies каждый."""
+"""Запускает headless-бинарники (VK, Telemost и опционально WBStream)."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 VK_BIN = ROOT / "headless-vk-creator-linux-x64"
 TELEMOST_BIN = ROOT / "headless-telemost-creator-linux-x64"
+WBSTREAM_BIN = ROOT / "headless-wbstream-creator-linux-x64"
 
 COOKIES_LOCAL = Path(os.environ.get("COOKIES_LOCAL_DIR", "/app/cookies/local"))
 COOKIES_VOLUME = Path(os.environ.get("COOKIES_VOLUME_DIR", "/app/cookies/volume"))
@@ -83,6 +84,11 @@ def send_telegram_conference_suspended(stopped_label: str, exit_code: int) -> No
     send_telegram_text("\n".join(lines))
 
 
+def wbstream_enabled() -> bool:
+    raw = os.environ.get("WBSTREAM_ENABLED", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def prestart_delay_seconds() -> int:
     raw = os.environ.get("PRESTART_SECONDS", "3").strip()
     try:
@@ -92,7 +98,7 @@ def prestart_delay_seconds() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Запуск VK и Telemost headless с файлом куков.")
+    p = argparse.ArgumentParser(description="Запуск VK/Telemost с куками и WBStream без куков.")
     p.add_argument(
         "--vk-cookies",
         metavar="PATH",
@@ -186,10 +192,13 @@ def main() -> int:
     if not vk_resolved or not tm_resolved:
         return 1
 
-    jobs: list[tuple[str, Path, str]] = [
-        ("VK", VK_BIN, vk_resolved),
-        ("Telemost", TELEMOST_BIN, tm_resolved),
+    jobs: list[tuple[str, Path, list[str]]] = [
+        ("VK", VK_BIN, ["-cookies", vk_resolved]),
+        ("Telemost", TELEMOST_BIN, ["-cookies", tm_resolved]),
     ]
+
+    if wbstream_enabled():
+        jobs.append(("WBStream", WBSTREAM_BIN, []))
 
     labeled_procs: list[tuple[str, subprocess.Popen]] = []
 
@@ -213,18 +222,18 @@ def main() -> int:
 
     delay = prestart_delay_seconds()
     if delay > 0:
-        msg = f"Через {delay} с запуск конференций VK и Telemost."
+        msg = f"Через {delay} с запуск конференций VK, Telemost и WBStream."
         log_main(f"пауза {delay} с перед запуском процессов…")
         if _telegram_configured():
             send_telegram_text(msg)
         time.sleep(delay)
 
-    for label, binary, cookie_path in jobs:
+    for label, binary, extra_args in jobs:
         if not binary.is_file():
             log_main(f"не найден {binary}", file=sys.stderr)
             return 1
         os.chmod(binary, binary.stat().st_mode | 0o111)
-        cmd = [str(binary), "-cookies", cookie_path]
+        cmd = [str(binary), *extra_args]
         proc = subprocess.Popen(
             cmd,
             cwd=str(ROOT),
