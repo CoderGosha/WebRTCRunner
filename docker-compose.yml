@@ -6,4 +6,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./cookies:/app/cookies:ro
+      - ./cookies:/app/cookies/local:ro
+      - webrtc_runner_cookies:/app/cookies/volume
+
+volumes:
+  webrtc_runner_cookies:

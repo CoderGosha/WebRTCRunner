@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from typing import TextIO
 import json
 import os
 import re
@@ -20,7 +21,16 @@ ROOT = Path(__file__).resolve().parent
 VK_BIN = ROOT / "headless-vk-creator-linux-x64"
 TELEMOST_BIN = ROOT / "headless-telemost-creator-linux-x64"
 
+COOKIES_LOCAL = Path(os.environ.get("COOKIES_LOCAL_DIR", "/app/cookies/local"))
+COOKIES_VOLUME = Path(os.environ.get("COOKIES_VOLUME_DIR", "/app/cookies/volume"))
+
 JOIN_LINK_RE = re.compile(r"join_link:\s*(\S+)")
+LOG_PREFIX_MAIN = "[run_headless]"
+
+
+def log_main(msg: str, file: TextIO = sys.stdout) -> None:
+    for ln in msg.rstrip("\n").split("\n"):
+        print(f"{LOG_PREFIX_MAIN} {ln}", file=file, flush=True)
 
 
 def _telegram_configured() -> bool:
@@ -49,12 +59,12 @@ def send_telegram_text(text: str) -> None:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             if resp.status != 200:
-                print(f"run_headless: Telegram HTTP {resp.status}", file=sys.stderr)
+                log_main(f"Telegram HTTP {resp.status}", file=sys.stderr)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
-        print(f"run_headless: Telegram HTTP {e.code}: {detail}", file=sys.stderr)
+        log_main(f"Telegram HTTP {e.code}: {detail}", file=sys.stderr)
     except OSError as e:
-        print(f"run_headless: Telegram: {e}", file=sys.stderr)
+        log_main(f"Telegram: {e}", file=sys.stderr)
 
 
 def send_telegram_join_link(label: str, url: str) -> None:
@@ -105,12 +115,37 @@ def resolve_one(cli: str | None, env_name: str) -> str | None:
     return raw.strip() if raw and raw.strip() else None
 
 
+def resolve_cookie_file(spec: str, label: str) -> str | None:
+    """Сначала локальная директория (bind), затем named volume. Либо абсолютный путь, если файл есть."""
+    spec = spec.strip()
+    p = Path(spec)
+    if p.is_file():
+        resolved = str(p.resolve())
+        log_main(f"куки {label}: {resolved}")
+        return resolved
+    name = p.name
+    if not name:
+        log_main(f"неверное имя файла куков {label}: {spec!r}", file=sys.stderr)
+        return None
+    for base, src in ((COOKIES_LOCAL, "local"), (COOKIES_VOLUME, "volume")):
+        candidate = (base / name).resolve()
+        if candidate.is_file():
+            log_main(f"куки {label}: {candidate} (источник: {src})")
+            return str(candidate)
+    log_main(
+        f"нет файла куков {label} ({name!r}) ни в {COOKIES_LOCAL}, ни в {COOKIES_VOLUME}",
+        file=sys.stderr,
+    )
+    return None
+
+
 def stream_reader(label: str, proc: subprocess.Popen) -> None:
-    """Дублирует вывод процесса в stdout и после CALL CREATED выделяет join_link."""
+    """Дублирует вывод процесса в stdout с префиксом [VK] / [Telemost]."""
     assert proc.stdout is not None
+    prefix = f"[{label}]"
     awaiting = False
     for line in proc.stdout:
-        sys.stdout.write(line)
+        sys.stdout.write(f"{prefix} {line}")
         sys.stdout.flush()
         stripped = line.strip()
         if stripped == "CALL CREATED":
@@ -120,14 +155,13 @@ def stream_reader(label: str, proc: subprocess.Popen) -> None:
             m = JOIN_LINK_RE.search(line)
             if m:
                 url = m.group(1).rstrip()
-                print(
-                    "\n---------- run_headless: найдено ----------\n"
-                    "  CALL CREATED\n"
-                    f"  join_link: {url}\n"
-                    f"  ({label})\n"
-                    "-------------------------------------------\n",
-                    flush=True,
-                )
+                print(flush=True)
+                log_main("---------- найдено ----------")
+                log_main("  CALL CREATED")
+                log_main(f"  join_link: {url}")
+                log_main(f"  ({label})")
+                log_main("-------------------------------------------")
+                print(flush=True)
                 send_telegram_join_link(label, url)
                 awaiting = False
 
@@ -138,23 +172,23 @@ def main() -> int:
     tm_cookie = resolve_one(args.telemost_cookies, "TELEMOST_COOKIES")
 
     if not vk_cookie:
-        print("run_headless: нужен один файл куков VK (--vk-cookies или VK_COOKIES)", file=sys.stderr)
+        log_main("нужен один файл куков VK (--vk-cookies или VK_COOKIES)", file=sys.stderr)
         return 1
     if not tm_cookie:
-        print(
-            "run_headless: нужен один файл куков Telemost (--telemost-cookies или TELEMOST_COOKIES)",
+        log_main(
+            "нужен один файл куков Telemost (--telemost-cookies или TELEMOST_COOKIES)",
             file=sys.stderr,
         )
         return 1
 
-    for label, cpath in (("VK", vk_cookie), ("Telemost", tm_cookie)):
-        if not Path(cpath).is_file():
-            print(f"run_headless: нет файла куков {label}: {cpath}", file=sys.stderr)
-            return 1
+    vk_resolved = resolve_cookie_file(vk_cookie, "VK")
+    tm_resolved = resolve_cookie_file(tm_cookie, "Telemost")
+    if not vk_resolved or not tm_resolved:
+        return 1
 
     jobs: list[tuple[str, Path, str]] = [
-        ("VK", VK_BIN, vk_cookie),
-        ("Telemost", TELEMOST_BIN, tm_cookie),
+        ("VK", VK_BIN, vk_resolved),
+        ("Telemost", TELEMOST_BIN, tm_resolved),
     ]
 
     labeled_procs: list[tuple[str, subprocess.Popen]] = []
@@ -180,14 +214,14 @@ def main() -> int:
     delay = prestart_delay_seconds()
     if delay > 0:
         msg = f"Через {delay} с запуск конференций VK и Telemost."
-        print(f"run_headless: пауза {delay} с перед запуском процессов…", flush=True)
+        log_main(f"пауза {delay} с перед запуском процессов…")
         if _telegram_configured():
             send_telegram_text(msg)
         time.sleep(delay)
 
     for label, binary, cookie_path in jobs:
         if not binary.is_file():
-            print(f"run_headless: не найден {binary}", file=sys.stderr)
+            log_main(f"не найден {binary}", file=sys.stderr)
             return 1
         os.chmod(binary, binary.stat().st_mode | 0o111)
         cmd = [str(binary), "-cookies", cookie_path]
