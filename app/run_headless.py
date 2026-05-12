@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Запускает headless-бинарники (VK, Telemost и опционально WBStream)."""
+"""Запускает headless-бинарники VK, Telemost и WBStream по отдельным флагам окружения."""
 
 from __future__ import annotations
 
@@ -92,8 +92,8 @@ def send_telegram_conference_suspended(stopped_label: str, exit_code: int) -> No
     send_telegram_text("\n".join(lines))
 
 
-def wbstream_enabled() -> bool:
-    raw = os.environ.get("WBSTREAM_ENABLED", "1").strip().lower()
+def env_enabled(env_key: str, default: str = "1") -> bool:
+    raw = os.environ.get(env_key, default).strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
@@ -106,7 +106,9 @@ def prestart_delay_seconds() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Запуск VK/Telemost с куками и WBStream без куков.")
+    p = argparse.ArgumentParser(
+        description="Запуск VK/Telemost (куки) и WBStream без куков; включается через *_ENABLED.",
+    )
     p.add_argument(
         "--vk-cookies",
         metavar="PATH",
@@ -182,31 +184,50 @@ def stream_reader(label: str, proc: subprocess.Popen) -> None:
 
 def main() -> int:
     args = parse_args()
-    vk_cookie = resolve_one(args.vk_cookies, "VK_COOKIES")
-    tm_cookie = resolve_one(args.telemost_cookies, "TELEMOST_COOKIES")
+    vk_on = env_enabled("VK_ENABLED")
+    tm_on = env_enabled("TELEMOST_ENABLED")
+    wb_on = env_enabled("WBSTREAM_ENABLED")
 
-    if not vk_cookie:
-        log_main("нужен один файл куков VK (--vk-cookies или VK_COOKIES)", file=sys.stderr)
-        return 1
-    if not tm_cookie:
+    vk_cookie = resolve_one(args.vk_cookies, "VK_COOKIES") if vk_on else None
+    tm_cookie = resolve_one(args.telemost_cookies, "TELEMOST_COOKIES") if tm_on else None
+
+    if vk_on:
+        if not vk_cookie:
+            log_main("нужен один файл куков VK (--vk-cookies или VK_COOKIES)", file=sys.stderr)
+            return 1
+        vk_resolved = resolve_cookie_file(vk_cookie, "VK")
+        if not vk_resolved:
+            return 1
+    else:
+        vk_resolved = None
+
+    if tm_on:
+        if not tm_cookie:
+            log_main(
+                "нужен один файл куков Telemost (--telemost-cookies или TELEMOST_COOKIES)",
+                file=sys.stderr,
+            )
+            return 1
+        tm_resolved = resolve_cookie_file(tm_cookie, "Telemost")
+        if not tm_resolved:
+            return 1
+    else:
+        tm_resolved = None
+
+    jobs: list[tuple[str, Path, list[str]]] = []
+    if vk_on:
+        jobs.append(("VK", VK_BIN, ["-cookies", vk_resolved]))
+    if tm_on:
+        jobs.append(("Telemost", TELEMOST_BIN, ["-cookies", tm_resolved]))
+    if wb_on:
+        jobs.append(("WBStream", WBSTREAM_BIN, []))
+
+    if not jobs:
         log_main(
-            "нужен один файл куков Telemost (--telemost-cookies или TELEMOST_COOKIES)",
+            "включён хотя бы один сервис: VK_ENABLED, TELEMOST_ENABLED или WBSTREAM_ENABLED",
             file=sys.stderr,
         )
         return 1
-
-    vk_resolved = resolve_cookie_file(vk_cookie, "VK")
-    tm_resolved = resolve_cookie_file(tm_cookie, "Telemost")
-    if not vk_resolved or not tm_resolved:
-        return 1
-
-    jobs: list[tuple[str, Path, list[str]]] = [
-        ("VK", VK_BIN, ["-cookies", vk_resolved]),
-        ("Telemost", TELEMOST_BIN, ["-cookies", tm_resolved]),
-    ]
-
-    if wbstream_enabled():
-        jobs.append(("WBStream", WBSTREAM_BIN, []))
 
     labeled_procs: list[tuple[str, subprocess.Popen]] = []
 
@@ -230,7 +251,8 @@ def main() -> int:
 
     delay = prestart_delay_seconds()
     if delay > 0:
-        msg = f"Через {delay} с запуск конференций VK, Telemost и WBStream."
+        labels = [label for label, _, _ in jobs]
+        msg = f"Через {delay} с запуск: {', '.join(labels)}."
         log_main(f"пауза {delay} с перед запуском процессов…")
         if _telegram_configured():
             send_telegram_text(msg)

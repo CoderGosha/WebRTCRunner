@@ -21,6 +21,7 @@ https://github.com/kulikov0/whitelist-bypass
    - `vk-cookies.json`
    - `cookies-yandex.json`
 3. При необходимости заполни в `.env`:
+   - `VK_ENABLED`, `TELEMOST_ENABLED`, `WBSTREAM_ENABLED` — включают или выключают каждый headless-процесс (`1` / `0`, как у WB Stream).
    - `SERVER_NAME`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
