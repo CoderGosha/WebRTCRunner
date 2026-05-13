@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from typing import TextIO
 import html
 import json
@@ -28,6 +29,8 @@ COOKIES_VOLUME = Path(os.environ.get("COOKIES_VOLUME_DIR", "/app/cookies/volume"
 
 JOIN_LINK_RE = re.compile(r"join_link:\s*(\S+)")
 LOG_PREFIX_MAIN = "[run_headless]"
+RESTART_DELAY_SECONDS = 60
+MAX_RESTARTS = 10
 
 
 def log_main(msg: str, file: TextIO = sys.stdout) -> None:
@@ -85,11 +88,22 @@ def send_telegram_join_link(label: str, url: str) -> None:
 
 
 def send_telegram_conference_suspended(stopped_label: str, exit_code: int) -> None:
-    lines = ["Приостановлена конференция."]
+    lines = ["Приостановлен процесс конференции."]
     if exit_code != 0:
         lines.append("Сбой приложения.")
-    lines.append(f"Первым завершился процесс: {stopped_label}, код выхода: {exit_code}.")
+    lines.append(f"Завершился процесс: {stopped_label}, код выхода: {exit_code}.")
     send_telegram_text("\n".join(lines))
+
+
+@dataclass
+class JobState:
+    label: str
+    binary: Path
+    extra_args: list[str]
+    proc: subprocess.Popen | None = None
+    restart_attempts: int = 0
+    restart_at: float | None = None
+    stopped_forever: bool = False
 
 
 def env_enabled(env_key: str, default: str = "1") -> bool:
@@ -182,6 +196,27 @@ def stream_reader(label: str, proc: subprocess.Popen) -> None:
                 awaiting = False
 
 
+def start_job(job: JobState, env: dict[str, str]) -> bool:
+    if not job.binary.is_file():
+        log_main(f"не найден {job.binary}", file=sys.stderr)
+        return False
+    os.chmod(job.binary, job.binary.stat().st_mode | 0o111)
+    cmd = [str(job.binary), *job.extra_args]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    job.proc = proc
+    job.restart_at = None
+    threading.Thread(target=stream_reader, args=(job.label, proc), daemon=True).start()
+    return True
+
+
 def main() -> int:
     args = parse_args()
     vk_on = env_enabled("VK_ENABLED")
@@ -214,13 +249,13 @@ def main() -> int:
     else:
         tm_resolved = None
 
-    jobs: list[tuple[str, Path, list[str]]] = []
+    jobs: list[JobState] = []
     if vk_on:
-        jobs.append(("VK", VK_BIN, ["-cookies", vk_resolved]))
+        jobs.append(JobState("VK", VK_BIN, ["-cookies", vk_resolved]))
     if tm_on:
-        jobs.append(("Telemost", TELEMOST_BIN, ["-cookies", tm_resolved]))
+        jobs.append(JobState("Telemost", TELEMOST_BIN, ["-cookies", tm_resolved]))
     if wb_on:
-        jobs.append(("WBStream", WBSTREAM_BIN, []))
+        jobs.append(JobState("WBStream", WBSTREAM_BIN, []))
 
     if not jobs:
         log_main(
@@ -229,19 +264,17 @@ def main() -> int:
         )
         return 1
 
-    labeled_procs: list[tuple[str, subprocess.Popen]] = []
-
     def shutdown(signum: int, frame: object | None) -> None:
-        for _, proc in labeled_procs:
-            if proc.poll() is None:
-                proc.send_signal(signum)
-        for _, proc in labeled_procs:
-            if proc.poll() is None:
+        for job in jobs:
+            if job.proc is not None and job.proc.poll() is None:
+                job.proc.send_signal(signum)
+        for job in jobs:
+            if job.proc is not None and job.proc.poll() is None:
                 try:
-                    proc.wait(timeout=30)
+                    job.proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                    job.proc.kill()
+                    job.proc.wait()
         sys.exit(128 + signum if signum > 0 else 1)
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -251,50 +284,69 @@ def main() -> int:
 
     delay = prestart_delay_seconds()
     if delay > 0:
-        labels = [label for label, _, _ in jobs]
+        labels = [job.label for job in jobs]
         msg = f"Через {delay} с запуск: {', '.join(labels)}."
         log_main(f"пауза {delay} с перед запуском процессов…")
         if _telegram_configured():
             send_telegram_text(msg)
         time.sleep(delay)
 
-    for label, binary, extra_args in jobs:
-        if not binary.is_file():
-            log_main(f"не найден {binary}", file=sys.stderr)
+    for job in jobs:
+        if not start_job(job, env):
             return 1
-        os.chmod(binary, binary.stat().st_mode | 0o111)
-        cmd = [str(binary), *extra_args]
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(ROOT),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        labeled_procs.append((label, proc))
-
-    for label, proc in labeled_procs:
-        threading.Thread(target=stream_reader, args=(label, proc), daemon=True).start()
 
     try:
         while True:
-            for label, proc in labeled_procs:
-                code = proc.poll()
-                if code is not None:
-                    send_telegram_conference_suspended(label, code)
-                    for other_label, q in labeled_procs:
-                        if q is not proc and q.poll() is None:
-                            q.terminate()
-                    for _, q in labeled_procs:
-                        if q.poll() is None:
-                            try:
-                                q.wait(timeout=30)
-                            except subprocess.TimeoutExpired:
-                                q.kill()
-                                q.wait()
-                    return code
+            now = time.time()
+            active_or_pending = False
+            for job in jobs:
+                if job.stopped_forever:
+                    continue
+                if job.proc is not None:
+                    code = job.proc.poll()
+                    if code is None:
+                        active_or_pending = True
+                        continue
+                    send_telegram_conference_suspended(job.label, code)
+                    job.proc = None
+                    if code == 0:
+                        job.stopped_forever = True
+                        log_main(f"{job.label}: процесс завершился штатно, без перезапуска.")
+                        continue
+                    if job.restart_attempts >= MAX_RESTARTS:
+                        job.stopped_forever = True
+                        log_main(
+                            f"{job.label}: достигнут лимит перезапусков ({MAX_RESTARTS}), больше не перезапускаем.",
+                            file=sys.stderr,
+                        )
+                        send_telegram_text(
+                            f"{job.label}: достигнут лимит перезапусков ({MAX_RESTARTS}), перезапуски остановлены."
+                        )
+                        continue
+                    job.restart_attempts += 1
+                    job.restart_at = now + RESTART_DELAY_SECONDS
+                    active_or_pending = True
+                    log_main(
+                        f"{job.label}: падение (код {code}), перезапуск через {RESTART_DELAY_SECONDS} сек "
+                        f"(попытка {job.restart_attempts}/{MAX_RESTARTS}).",
+                        file=sys.stderr,
+                    )
+                    continue
+                if job.restart_at is not None:
+                    active_or_pending = True
+                    if now >= job.restart_at:
+                        if start_job(job, env):
+                            log_main(
+                                f"{job.label}: успешно перезапущен (попытка {job.restart_attempts}/{MAX_RESTARTS})."
+                            )
+                        else:
+                            job.stopped_forever = True
+                            send_telegram_text(
+                                f"{job.label}: не удалось перезапустить процесс, перезапуски остановлены."
+                            )
+            if not active_or_pending:
+                log_main("Все процессы остановлены, завершаем run_headless.")
+                return 0
             time.sleep(0.25)
     except KeyboardInterrupt:
         shutdown(signal.SIGINT, None)
