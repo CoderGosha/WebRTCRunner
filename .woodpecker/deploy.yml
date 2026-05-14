@@ -1,0 +1,37 @@
+when:
+  - event: push
+    branch: main
+  - event: manual
+
+steps:
+  - name: sync
+    image: appleboy/drone-scp
+    settings:
+      host:
+        from_secret: server_proxy
+      username: root
+      key:
+        from_secret: ssh_private
+      port: 22
+      target: /root/WebRTCRunner
+      source:
+        - app
+        - Dockerfile
+        - docker-compose.yml
+        - README.md
+        - .env.example
+      command_timeout: 10m
+
+  - name: compose-up
+    image: appleboy/drone-ssh
+    settings:
+      host:
+        from_secret: server_proxy
+      username: root
+      key:
+        from_secret: ssh_private
+      port: 22
+      command_timeout: 15m
+      script_stop: true
+      script:
+        - cd /root/WebRTCRunner && docker compose up -d --build
