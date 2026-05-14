@@ -22,6 +22,20 @@ steps:
         - .env.example
       command_timeout: 10m
 
+  - name: compose-down
+    image: appleboy/drone-ssh
+    settings:
+      host:
+        from_secret: server_proxy
+      username: root
+      key:
+        from_secret: ssh_private
+      port: 22
+      command_timeout: 5m
+      script_stop: true
+      script:
+        - cd /root/WebRTCRunner && docker compose down --remove-orphans || true
+
   - name: compose-up
     image: appleboy/drone-ssh
     settings:
