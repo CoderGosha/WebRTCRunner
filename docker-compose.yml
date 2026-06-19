@@ -1,5 +1,6 @@
 services:
   webrtc-runner:
+    platform: linux/amd64
     build: .
     network_mode: host
     restart: unless-stopped

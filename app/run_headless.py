@@ -20,9 +20,10 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VK_BIN = ROOT / "headless-vk-creator-linux-x64"
-TELEMOST_BIN = ROOT / "headless-telemost-creator-linux-x64"
-WBSTREAM_BIN = ROOT / "headless-wbstream-creator-linux-x64"
+BIN_DIR = ROOT / "whitelist-bypass-cli-linux-x64"
+VK_BIN = BIN_DIR / "headless-vk-creator"
+TELEMOST_BIN = BIN_DIR / "headless-telemost-creator"
+WBSTREAM_BIN = BIN_DIR / "headless-wbstream-creator"
 
 COOKIES_LOCAL = Path(os.environ.get("COOKIES_LOCAL_DIR", "/app/cookies/local"))
 COOKIES_VOLUME = Path(os.environ.get("COOKIES_VOLUME_DIR", "/app/cookies/volume"))

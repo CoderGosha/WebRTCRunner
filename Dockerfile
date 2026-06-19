@@ -10,6 +10,6 @@ RUN apt-get update \
 COPY app /app
 WORKDIR /app
 
-RUN chmod +x headless-*-linux-x64 run_headless.py 2>/dev/null || true
+RUN chmod +x whitelist-bypass-cli-linux-x64/headless-* run_headless.py
 
 CMD ["python3", "run_headless.py"]
